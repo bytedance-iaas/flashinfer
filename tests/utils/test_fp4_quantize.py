@@ -101,6 +101,57 @@ def unswizzle_sf(
     return sf_unswizzle_sliced.contiguous()
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("m", [x for x in range(1000, 8192)])
+@pytest.mark.parametrize("n", [7168])
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("sf_use_ue8m0", [False])
+@pytest.mark.parametrize("is_swizzled", [False])
+@torch.inference_mode()
+def test_fp4_quantization_non_swizzled(
+    dtype: torch.dtype,
+    m: int,
+    n: int,
+    seed: int,
+    device: str,
+    sf_use_ue8m0: bool,
+    is_swizzled: bool,
+) -> None:
+    if not is_sm100a_supported(torch.device(device)):
+        pytest.skip("Nvfp4 Requires compute capability >= 10 and CUDA >= 12.8")
+    torch.set_default_device(device)
+    torch.manual_seed(seed)
+    # m, n = shape
+    sf_vec_size = 32 if sf_use_ue8m0 else 16
+    x = torch.randn((m, n), dtype=dtype)
+    tensor_amax = torch.abs(x).max().to(torch.float32)
+    if sf_use_ue8m0:
+        global_scale = torch.tensor(1.0, dtype=torch.float32)
+    else:
+        global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / tensor_amax
+    out_ref, scale_ref = ref_fp4_quant(x, global_scale, sf_vec_size, sf_use_ue8m0)
+    out, out_scale = fp4_quantize(
+        x, global_scale, sf_vec_size, sf_use_ue8m0, is_swizzled
+    )
+
+    assert n % sf_vec_size == 0, f"cols needs to be {sf_vec_size} divisible"
+    if sf_use_ue8m0:
+        out_scale = (out_scale.to(torch.int32) << 23).view(torch.float32)
+    else:
+        out_scale = out_scale.view(torch.float8_e4m3fn).to(torch.float32)
+    if is_swizzled:
+        scale_ans = unswizzle_sf(
+            out_scale.reshape(-1, n // sf_vec_size), m, n, sf_vec_size
+        )
+    else:
+        scale_ans = out_scale
+    out_ans = cast_from_fp4(out).reshape(m, n)
+
+    torch.testing.assert_close(out_ans, out_ref, rtol=1e0, atol=1e-1)
+    torch.testing.assert_close(scale_ans, scale_ref, rtol=1e-1, atol=1e-1)
+
+
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("shape", SHAPES)
 @pytest.mark.parametrize("seed", SEEDS)
