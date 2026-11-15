@@ -449,7 +449,7 @@ def test_ragged_certified_long_bound_preserves_explicit_causal_offsets(heads):
 
 def test_ragged_certified_million_key_append_matches_exact_reference():
     """A near-1M append selects the exact TopK without materializing all scores."""
-    rows, keys, heads, top_k = 128, 1000000, 32, 2048
+    rows, keys, heads, top_k = 1024, 1000000, 32, 2048
     offsets = torch.tensor([keys - rows], dtype=torch.int64, device="cuda")
     q, k, weights, ids, scores = _ragged_call(
         False,
@@ -464,7 +464,7 @@ def test_ragged_certified_million_key_append_matches_exact_reference():
         enable_pdl=False,
     )
     # Bound reference memory to one full-history row, including causal prefix.
-    for row in (0, rows - 1):
+    for row in (0, rows // 2, rows - 1):
         visible = keys - rows + row + 1
         reference = _scores(
             q.value[row : row + 1], weights[row : row + 1], k.value[:visible]
