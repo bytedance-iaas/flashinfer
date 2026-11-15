@@ -447,6 +447,31 @@ def test_ragged_certified_long_bound_preserves_explicit_causal_offsets(heads):
     assert _routes(70000, sum(seg_k), sum(seg_q), 4, offsets, 1, 50001) == (0, True)
 
 
+def test_ragged_certified_million_key_append_matches_exact_reference():
+    """A near-1M append selects the exact TopK without materializing all scores."""
+    rows, keys, heads, top_k = 128, 1000000, 32, 2048
+    offsets = torch.tensor([keys - rows], dtype=torch.int64, device="cuda")
+    q, k, weights, ids, scores = _ragged_call(
+        False,
+        heads,
+        top_k,
+        [rows],
+        [keys],
+        7,
+        q_causal_offsets=offsets,
+        min_seqlen_k=keys - rows + 1,
+        max_seqlen_k=keys,
+        enable_pdl=False,
+    )
+    # Bound reference memory to one full-history row, including causal prefix.
+    for row in (0, rows - 1):
+        visible = keys - rows + row + 1
+        reference = _scores(
+            q.value[row : row + 1], weights[row : row + 1], k.value[:visible]
+        )
+        _check_row(ids[row], scores[row], reference[0], top_k, True, str(row))
+
+
 def test_ragged_validation():
     dev = torch.device("cuda")
     q = torch.zeros(4, 32, _D, device=dev).to(torch.float8_e4m3fn)
