@@ -97,6 +97,15 @@ from .backends.mega.kernel.sm120.mxfp8_mxfp8_bf16_cutedsl import (
     Sm120_Mxfp8_Mxfp8_Bf16_Cutedsl_MegaMoeConfig,
     preprocess_mega_weights as preprocess_sm120_mxfp8_cutedsl_mega_weights,
 )
+from .backends.mega.kernel.sm120.nvfp4_nvfp4_bf16_cake import (
+    Sm120_Nvfp4_Nvfp4_Bf16_Cake_MegaMoeConfig,
+    TransformedCakeNvfp4MegaWeights,
+    mxfp4_scales_to_nvfp4,
+    mxfp4_scales_to_nvfp4_shifted,
+)
+from .backends.mega.kernel.sm120.mxfp4_mxfp8_bf16_cake import (
+    Sm120_Mxfp4_Mxfp8_Bf16_Cake_MegaMoeConfig,
+)
 from .backends.mega.kernel.sm90.bf16_bf16_bf16_push_cake import (
     Sm90_Bf16_Bf16_Bf16_PushCake_MegaMoeConfig,
     preprocess_mega_weights as preprocess_sm90_push_cake_bf16_mega_weights,
@@ -215,6 +224,11 @@ from .weights import (
 )
 
 __all__ = [
+    "Sm120_Nvfp4_Nvfp4_Bf16_Cake_MegaMoeConfig",
+    "Sm120_Mxfp4_Mxfp8_Bf16_Cake_MegaMoeConfig",
+    "TransformedCakeNvfp4MegaWeights",
+    "mxfp4_scales_to_nvfp4",
+    "mxfp4_scales_to_nvfp4_shifted",
     "AlgoKnob",
     "BootstrapConfig",
     "CakeAlltoAll",
