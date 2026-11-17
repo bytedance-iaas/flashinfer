@@ -248,6 +248,7 @@ def dsa_indexer_det_topk(
     scores: Optional[torch.Tensor] = None,
     return_scores: bool = True,
     enable_pdl: Optional[bool] = None,
+    diagnostic_counts: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """The ragged form (see flashinfer.dsa_indexer.dsa_indexer_det_topk)."""
     fp4 = q_scale is not None
@@ -287,6 +288,19 @@ def dsa_indexer_det_topk(
     else:
         k_scale = k_scale.contiguous().view(-1)
     indices, scores = _outputs(indices, scores, return_scores, num_rows, top_k, dev)
+    if diagnostic_counts is not None:
+        expected_shape = ((num_rows + _SCAN_ROWS - 1) // _SCAN_ROWS, 8)
+        if (
+            diagnostic_counts.shape != expected_shape
+            or diagnostic_counts.dtype != torch.int32
+            or diagnostic_counts.device != dev
+            or not diagnostic_counts.is_contiguous()
+        ):
+            raise ValueError(
+                "diagnostic_counts must be a contiguous int32 tensor on the query "
+                f"device with shape {expected_shape}"
+            )
+        diagnostic_counts.zero_()
     # A row sees at most its segment's keys.
     bound = k.shape[0] if max_seqlen_k is None else min(k.shape[0], max_seqlen_k)
     if num_rows == 0:
@@ -319,7 +333,11 @@ def dsa_indexer_det_topk(
     cand_score = torch.empty(sr, _CAPACITY, **f32)
     cand_id = torch.empty(sr, _CAPACITY, **i32)
     fallback_rows = torch.empty(2, sr, **i32)
-    fallback_count = torch.empty(4, **i32)  # zeroed on the device
+    fallback_count = (
+        torch.empty(4, **i32)
+        if diagnostic_counts is None
+        else diagnostic_counts.view(-1)
+    )  # zeroed on the device
     exact_state = torch.empty(sr, 8, **i32)
     sample_slots = torch.empty(sr, **i32)
     block_q = 128 // num_heads

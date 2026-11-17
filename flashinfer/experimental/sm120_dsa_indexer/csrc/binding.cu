@@ -391,6 +391,9 @@ void Run(TensorView q, TensorView k, TensorView k_scale, TensorView w, TensorVie
   const int chunk_rows = static_cast<int>(cand_score.size(0));
   TVM_FFI_ICHECK(chunk_rows >= num_rows || (chunk_rows > 0 && chunk_rows % block_q == 0))
       << "the scan buffers hold all rows or a multiple of block_q rows";
+  const bool diagnostics = fallback_count.size(0) != 4;
+  if (diagnostics)
+    TVM_FFI_ICHECK_EQ(fallback_count.size(0), 8 * ((num_rows + chunk_rows - 1) / chunk_rows));
   int top_class = 0;
   while (res_classes >> (top_class + 1)) ++top_class;
   // The scan skips the resident classes' blocks.
@@ -420,7 +423,7 @@ void Run(TensorView q, TensorView k, TensorView k_scale, TensorView w, TensorVie
     // (always empty). fallback_count [4]: their counts, zeroed by the sample
     // launch (no fill launch).
     int32_t* fb_rows = ptr<int32_t>(fallback_rows);
-    int32_t* fb_count = ptr<int32_t>(fallback_count);
+    int32_t* fb_count = ptr<int32_t>(fallback_count) + (diagnostics ? 8 * (row0 / chunk_rows) : 0);
     ExactState* xs = static_cast<ExactState*>(exact_state.data_ptr());
     sp.row_ks = row_ks_p;
     sp.row_ke = row_ke_p;
@@ -464,6 +467,7 @@ void Run(TensorView q, TensorView k, TensorView k_scale, TensorView w, TensorVie
     tp.tau = ptr<float>(tau);
     tp.count = ptr<int32_t>(count);
     tp.fallback_count = fb_count;
+    tp.diagnostics = diagnostics ? fb_count : nullptr;
     tp.num_rows = num_rows;
     tp.capacity = static_cast<int>(capacity);
     tp.target = static_cast<int>(target);
@@ -491,6 +495,7 @@ void Run(TensorView q, TensorView k, TensorView k_scale, TensorView w, TensorVie
     fp.sort_slots = sort_slots;
     fp.block_q = block_q;
     fp.res_cap = scan_cap;
+    fp.diagnostics = diagnostics ? fb_count : nullptr;
 
     sp.num_units = q_blocks;
     sp.tile_prefix = ptr<const int32_t>(tile_prefix);

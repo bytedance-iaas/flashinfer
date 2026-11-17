@@ -56,6 +56,7 @@ def dsa_indexer_topk(
     block_table: Optional[torch.Tensor] = None,
     context_lens: Optional[torch.Tensor] = None,
     enable_pdl: Optional[bool] = None,
+    diagnostic_counts: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     r"""Fused DSA indexer scoring and deterministic exact top-k selection
     (DeepSeek Sparse Attention indexer, training), SM100 / SM103 / SM107 only.
@@ -127,6 +128,14 @@ def dsa_indexer_topk(
         segment, for ragged SM120 calls only. The caller must derive it from
         exact metadata for this call; a bound above 48K omits resident scratch.
         It never replaces ``q_causal_offsets`` or changes causal positions.
+    diagnostic_counts : Optional[torch.Tensor]
+        Ragged SM120-only caller-owned contiguous int32 CUDA output of shape
+        ``[ceil(T / 4096), 8]``. Records per scan chunk: recovery rows, exact
+        recovery failures, insufficient candidates, candidate overflow, scanned
+        rows, rows with sampled cutoff ties, empty recovery launches, and the
+        number of sampled keys tied at the cutoff. Resident-only chunks are
+        zero. No host synchronization is added; read after the call completes.
+        Omit for normal execution. Concurrent calls need distinct outputs.
 
     Returns
     -------
@@ -145,6 +154,8 @@ def dsa_indexer_topk(
     rank below every other score and the kernels never hang.
     """
     paged = block_table is not None or context_lens is not None
+    if diagnostic_counts is not None and (backend != "sm120" or paged):
+        raise ValueError("diagnostic_counts requires ragged backend='sm120'")
     if paged and backend != "sm120":
         raise ValueError(
             "the paged form (block_table, context_lens) needs backend='sm120'"
@@ -209,6 +220,7 @@ def dsa_indexer_topk(
             ratio=ratio,
             max_seqlen_k=max_seqlen_k,
             min_seqlen_k=min_seqlen_k,
+            diagnostic_counts=diagnostic_counts,
             indices=indices,
             scores=scores,
             return_scores=return_scores,

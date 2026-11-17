@@ -397,6 +397,48 @@ def _ragged_call(fp4, heads, top_k, seg_q, seg_k, seed, **kw):
     return q, k, w, idx, sc
 
 
+@pytest.mark.parametrize("heads", [32, 64])
+@pytest.mark.parametrize("route", ["insufficient", "overflow", "empty_recovery"])
+def test_ragged_diagnostics_preserve_exact_outputs(heads, route):
+    """Recovery counters distinguish failure reasons without changing TopK."""
+    rows, keys, top_k = 8, 65536, 2048
+    dev = torch.device("cuda")
+    q = torch.ones(rows, heads, 128, device=dev).to(torch.float8_e4m3fn)
+    k = torch.ones(keys, 128, device=dev).to(torch.float8_e4m3fn)
+    w = torch.ones(rows, heads, device=dev)
+    scales = torch.ones(keys, device=dev)
+    if route == "empty_recovery":
+        scales = torch.arange(1, keys + 1, device=dev, dtype=torch.float32)
+    elif route == "insufficient":
+        # The first 64 sampled 16-key chunks are high: only 1024 real keys,
+        # enough to dominate the sampled cut but fewer than the exact TopK.
+        sampled = 256 * torch.arange(64, device=dev)[:, None]
+        sampled = sampled + torch.arange(16, device=dev)[None, :]
+        scales[sampled.flatten()] = 2
+    cu_q = torch.tensor([0, rows], dtype=torch.int32, device=dev)
+    cu_k = torch.tensor([0, keys], dtype=torch.int32, device=dev)
+    kwargs = dict(top_k=top_k, backend="sm120", k_scale=scales, enable_pdl=False)
+    expected_i, expected_s = dsa_indexer_det_topk(q, k, w, cu_q, cu_k, **kwargs)
+    counts = torch.full((1, 8), -1, dtype=torch.int32, device=dev)
+    actual_i, actual_s = dsa_indexer_det_topk(
+        q, k, w, cu_q, cu_k, diagnostic_counts=counts, **kwargs
+    )
+    torch.testing.assert_close(actual_i, expected_i, atol=0, rtol=0)
+    torch.testing.assert_close(actual_s, expected_s, atol=0, rtol=0)
+    recorded = counts.cpu().tolist()[0]
+    assert recorded[1] == 0  # the full exact recovery never overflows
+    assert recorded[4] == rows
+    if route == "empty_recovery":
+        assert recorded[0:4] == [0, 0, 0, 0]
+        assert recorded[5:8] == [0, 1, rows]
+    else:
+        assert recorded[0] == rows
+        assert recorded[2:4] == ([rows, 0] if route == "insufficient" else [0, rows])
+        assert recorded[5] == rows
+        assert recorded[6] == 0
+        assert recorded[7] > rows
+
+
 @pytest.mark.parametrize("top_k", [1, 1000, 4096])
 def test_ragged_top_k(top_k):
     seg_q, seg_k = [64, 32], [5000, 20000]
