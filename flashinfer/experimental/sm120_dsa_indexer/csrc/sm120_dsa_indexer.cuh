@@ -428,6 +428,7 @@ struct TauParams {
   float* tau;
   int32_t* count;
   int32_t* fallback_count;  // zeroed here, filled by finalize
+  int32_t* diagnostics;     // optional per-chunk counters
   int num_rows;
   int capacity;
   int target;  // candidates a row
@@ -445,6 +446,7 @@ struct FinalizeParams {
   float* scores;           // [T, top_k]
   int32_t* fallback_rows;  // [T]
   int32_t* fallback_count;
+  int32_t* diagnostics;
   int num_rows;
   int capacity;
   int top_k;
@@ -1127,7 +1129,13 @@ __device__ __noinline__ void tau_row(const TauParams& p, int r, uint32_t* key) {
         return true;
       },
       hist, &s_prefix, &s_want, &s_eq);
-  if (threadIdx.x == 0) p.tau[r] = order_value(o);
+  if (threadIdx.x == 0) {
+    p.tau[r] = order_value(o);
+    if (p.diagnostics != nullptr) {
+      if (s_eq > 1) atomicAdd(p.diagnostics + 5, 1);
+      atomicAdd(p.diagnostics + 7, s_eq);
+    }
+  }
 }
 
 // Setup shared by the threshold launch and the fused sample launch: zero the
@@ -1180,10 +1188,16 @@ __device__ __noinline__ void finalize_row(const FinalizeParams& p, int r, uint8_
   const int visible = p.row_ke[r] - __ldg(p.row_ks + r);
   const int c = p.count[r];
   const int want = min(p.top_k, visible);
+  if (threadIdx.x == 0 && p.diagnostics != nullptr && p.xs != nullptr)
+    atomicAdd(p.diagnostics + 4, 1);
   int32_t* out_i = p.indices + static_cast<int64_t>(r) * p.top_k;
   float* out_s = score_row(p.scores, static_cast<int64_t>(r) * p.top_k);
   if (c < want || c > p.capacity) {
-    if (threadIdx.x == 0) p.fallback_rows[atomicAdd(p.fallback_count, 1)] = r;
+    if (threadIdx.x == 0) {
+      p.fallback_rows[atomicAdd(p.fallback_count, 1)] = r;
+      if (p.diagnostics != nullptr && p.xs != nullptr)
+        atomicAdd(p.diagnostics + (c < want ? 2 : 3), 1);
+    }
     if (p.xs != nullptr) {
       // The candidates are discarded: the buffer becomes the row's histogram.
       uint32_t* ghist = reinterpret_cast<uint32_t*>(const_cast<float*>(p.cand_score) +
@@ -1910,7 +1924,13 @@ __global__ void __launch_bounds__(kNumWsThreads, 1)
   constexpr int kNumPhases = kMode == Mode::kExact ? kExactPhases : 1;
   pdl_enter();
   // No listed row (the common case): every CTA leaves before any setup.
-  if (p.num_unit_rows != nullptr && *p.num_unit_rows == 0) return;
+  if (p.num_unit_rows != nullptr && *p.num_unit_rows == 0) {
+    if constexpr (kMode == Mode::kExact) {
+      if (blockIdx.x == 0 && threadIdx.x == 0 && p.fin_p.diagnostics != nullptr)
+        atomicAdd(p.fin_p.diagnostics + 6, 1);
+    }
+    return;
+  }
   // RESIDENT: no row of this launch's class (the launches are fixed by the
   // shapes; the lengths are known only here): every CTA leaves at once.
   if constexpr (kMode == Mode::kResident) {

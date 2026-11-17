@@ -52,6 +52,20 @@ Longer rows take a sampled-threshold scan:
 - An exact selection runs over the candidates.
 - Rows whose candidate count misses the bounds get an exact rescan.
 
+### Optional ragged diagnostics
+
+The caller may supply `diagnostic_counts`, a contiguous int32 CUDA tensor of
+shape `[ceil(T / 4096), 8]`, with separate storage for each concurrent call.
+The output is overwritten on the call's stream. Its columns are recovery rows,
+exact-recovery failures, candidate deficits, candidate overflows, scanned rows,
+rows with ties at the sampled score cutoff, empty recovery launches, and the
+number of sampled keys equal to the cutoff. Counts are per bounded scan chunk;
+resident-only chunks contain zeros. These are recovery diagnostics, not kernel
+time or an attribution of the cause of every overflow. Read or copy the output
+only after the call has completed. Normal execution omits this output and does
+not allocate diagnostics or perform their atomics. Diagnostic runs must be
+separate from performance measurements.
+
 ### Decode
 
 Decode uses two kernels:
