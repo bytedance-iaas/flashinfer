@@ -418,7 +418,9 @@ def test_ragged_diagnostics_preserve_exact_outputs(heads, route):
     cu_q = torch.tensor([0, rows], dtype=torch.int32, device=dev)
     cu_k = torch.tensor([0, keys], dtype=torch.int32, device=dev)
     kwargs = dict(top_k=top_k, backend="sm120", k_scale=scales, enable_pdl=False)
-    expected_i, expected_s = dsa_indexer_det_topk(q, k, w, cu_q, cu_k, **kwargs)
+    expected_i, expected_s = dsa_indexer_det_topk(
+        q, k, w, cu_q, cu_k, recovery_splits="legacy", **kwargs
+    )
     counts = torch.full((1, 8), -1, dtype=torch.int32, device=dev)
     actual_i, actual_s = dsa_indexer_det_topk(
         q, k, w, cu_q, cu_k, diagnostic_counts=counts, **kwargs
@@ -437,6 +439,78 @@ def test_ragged_diagnostics_preserve_exact_outputs(heads, route):
         assert recorded[5] == rows
         assert recorded[6] == 0
         assert recorded[7] > rows
+
+
+@pytest.mark.parametrize("fp4", [False, True])
+@pytest.mark.parametrize("heads", [32, 64])
+def test_adaptive_recovery_matches_legacy_for_split_segments(fp4, heads):
+    """Key partitions preserve score bits and ties across disjoint segments."""
+    dev = torch.device("cuda")
+    generator = torch.Generator(device=dev).manual_seed(71)
+    rows, keys = 32, 65536 + 80000
+    q = _queries(fp4, (rows, heads), generator, dev)
+    k = _keys(fp4, (keys,), generator, dev)
+    weights = torch.zeros(rows, heads, device=dev)
+    cu_q = torch.tensor([0, 3, rows], dtype=torch.int32, device=dev)
+    cu_k = torch.tensor([0, 65536, keys], dtype=torch.int32, device=dev)
+    offsets = torch.tensor([60000, 70000], dtype=torch.int64, device=dev)
+    kwargs = dict(
+        backend="sm120",
+        k_scale=k.scale,
+        q_scale=q.scale,
+        top_k=2048,
+        q_causal_offsets=offsets,
+        enable_pdl=False,
+    )
+    expected_i, expected_s = dsa_indexer_det_topk(
+        q.data, k.data, weights, cu_q, cu_k, recovery_splits="legacy", **kwargs
+    )
+    ids, scores = dsa_indexer_det_topk(
+        q.data, k.data, weights, cu_q, cu_k, recovery_splits="adaptive", **kwargs
+    )
+    torch.testing.assert_close(ids, expected_i, atol=0, rtol=0)
+    torch.testing.assert_close(scores, expected_s, atol=0, rtol=0)
+    for row in range(rows):
+        visible = 60001 + row if row < 3 else 70001 + row - 3
+        torch.testing.assert_close(
+            ids[row],
+            torch.arange(visible - 2048, visible, device=dev, dtype=torch.int32),
+            atol=0,
+            rtol=0,
+        )
+
+
+@pytest.mark.parametrize("heads", [32, 64])
+@pytest.mark.parametrize("flagged", [1, 64])
+def test_adaptive_recovery_handles_sparse_and_dense_flagged_rows(heads, flagged):
+    """A single flagged row and a full flagged batch retain exact ID/score bits."""
+    rows, keys = 64, 65536
+    dev = torch.device("cuda")
+    q = torch.ones(rows, heads, 128, device=dev).to(torch.float8_e4m3fn)
+    k = torch.ones(keys, 128, device=dev).to(torch.float8_e4m3fn)
+    weights = torch.ones(rows, heads, device=dev)
+    weights[:flagged].zero_()
+    scale = torch.arange(1, keys + 1, dtype=torch.float32, device=dev)
+    cu_q = torch.tensor([0, rows], dtype=torch.int32, device=dev)
+    cu_k = torch.tensor([0, keys], dtype=torch.int32, device=dev)
+    args = dict(backend="sm120", k_scale=scale, enable_pdl=False)
+    reference_i, reference_s = dsa_indexer_det_topk(
+        q, k, weights, cu_q, cu_k, recovery_splits="legacy", **args
+    )
+    counts = torch.empty((1, 8), dtype=torch.int32, device=dev)
+    ids, scores = dsa_indexer_det_topk(
+        q,
+        k,
+        weights,
+        cu_q,
+        cu_k,
+        recovery_splits="adaptive",
+        diagnostic_counts=counts,
+        **args,
+    )
+    torch.testing.assert_close(ids, reference_i, atol=0, rtol=0)
+    torch.testing.assert_close(scores, reference_s, atol=0, rtol=0)
+    assert counts.cpu().tolist()[0][0] == flagged
 
 
 @pytest.mark.parametrize("top_k", [1, 1000, 4096])

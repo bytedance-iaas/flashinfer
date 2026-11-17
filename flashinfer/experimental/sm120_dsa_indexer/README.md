@@ -52,6 +52,14 @@ Longer rows take a sampled-threshold scan:
 - An exact selection runs over the candidates.
 - Rows whose candidate count misses the bounds get an exact rescan.
 
+Ragged calls use adaptive recovery splits by default. Each exact CTA reads the
+immutable flagged-row count and chooses the same split count under the existing
+3% waves-per-split policy. Unit enumeration, key ranges and the histogram's
+completion count use that value for every phase. This avoids a host count read
+and does not change scores, causal visibility or deterministic TopK. Set
+`recovery_splits="legacy"` to retain the one-row-per-256 host estimate. The
+candidate capacity and scratch buffers remain unchanged.
+
 ### Optional ragged diagnostics
 
 The caller may supply `diagnostic_counts`, a contiguous int32 CUDA tensor of

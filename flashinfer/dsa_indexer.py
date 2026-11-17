@@ -57,6 +57,7 @@ def dsa_indexer_topk(
     context_lens: Optional[torch.Tensor] = None,
     enable_pdl: Optional[bool] = None,
     diagnostic_counts: Optional[torch.Tensor] = None,
+    recovery_splits: Optional[str] = None,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     r"""Fused DSA indexer scoring and deterministic exact top-k selection
     (DeepSeek Sparse Attention indexer, training), SM100 / SM103 / SM107 only.
@@ -136,6 +137,11 @@ def dsa_indexer_topk(
         number of sampled keys tied at the cutoff. Resident-only chunks are
         zero. No host synchronization is added; read after the call completes.
         Omit for normal execution. Concurrent calls need distinct outputs.
+    recovery_splits : Optional[str]
+        Ragged SM120 recovery scheduling: ``None`` / ``"adaptive"`` derives
+        key splits on the device from the actual flagged-row count; ``"legacy"``
+        retains the host estimate of one recovery row per 256 query rows.
+        Both paths compute the same native scores and deterministic exact TopK.
 
     Returns
     -------
@@ -156,6 +162,8 @@ def dsa_indexer_topk(
     paged = block_table is not None or context_lens is not None
     if diagnostic_counts is not None and (backend != "sm120" or paged):
         raise ValueError("diagnostic_counts requires ragged backend='sm120'")
+    if recovery_splits is not None and (backend != "sm120" or paged):
+        raise ValueError("recovery_splits requires ragged backend='sm120'")
     if paged and backend != "sm120":
         raise ValueError(
             "the paged form (block_table, context_lens) needs backend='sm120'"
@@ -221,6 +229,7 @@ def dsa_indexer_topk(
             max_seqlen_k=max_seqlen_k,
             min_seqlen_k=min_seqlen_k,
             diagnostic_counts=diagnostic_counts,
+            recovery_splits=recovery_splits,
             indices=indices,
             scores=scores,
             return_scores=return_scores,

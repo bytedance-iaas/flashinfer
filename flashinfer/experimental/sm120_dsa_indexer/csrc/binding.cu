@@ -240,7 +240,8 @@ void Run(TensorView q, TensorView k, TensorView k_scale, TensorView w, TensorVie
          TensorView indices, Optional<TensorView> scores, TensorView tile_prefix,
          TensorView exact_state, TensorView sample_slots, Optional<TensorView> q_sf,
          Optional<TensorView> res_scratch, Optional<TensorView> row_classes, int64_t res_cap,
-         int64_t res_bound, int64_t res_classes, bool run_scan, bool enable_pdl) {
+         int64_t res_bound, int64_t res_classes, bool run_scan, bool enable_pdl,
+         bool adaptive_recovery) {
   const bool fp4 = q_sf.has_value();
   const int64_t row_bytes = fp4 ? kHeadDim / 2 : kHeadDim;
   if (fp4) {
@@ -406,9 +407,10 @@ void Run(TensorView q, TensorView k, TensorView k_scale, TensorView w, TensorVie
   static_assert(sizeof(ExactState) == 32, "exact_state is [T, 8] int32");
   auto scan_chunk = [&](int row0, int num_rows) {
     const int q_blocks = (num_rows + block_q - 1) / block_q;
-    // The exact path rescans only the few rows the scan flagged (their count
-    // is read on the device): its key splits are sized for one row in 256.
-    const int kv_splits = choose_kv_splits(std::max(1, num_rows / 256), num_keys, num_sms);
+    // Adaptive recovery reserves the single-row split bound. Each CTA picks
+    // the same effective split count from the immutable device-side row count.
+    const int kv_splits =
+        choose_kv_splits(adaptive_recovery ? 1 : std::max(1, num_rows / 256), num_keys, num_sms);
     ScoreInputs cin = in;
     cin.q = static_cast<const uint8_t*>(in.q) + static_cast<int64_t>(row0) * num_heads * row_bytes;
     cin.w = static_cast<const float*>(in.w) + static_cast<int64_t>(row0) * num_heads;
@@ -511,6 +513,7 @@ void Run(TensorView q, TensorView k, TensorView k_scale, TensorView w, TensorVie
     }
 
     sp.kv_splits = kv_splits;
+    sp.adaptive_recovery = adaptive_recovery;
     sp.num_units = num_rows * kv_splits;  // a bound: the list length is read on the device
     sp.unit_rows = fb_rows;
     sp.num_unit_rows = fb_count;
