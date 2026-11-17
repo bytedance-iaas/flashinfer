@@ -249,9 +249,12 @@ def dsa_indexer_det_topk(
     return_scores: bool = True,
     enable_pdl: Optional[bool] = None,
     diagnostic_counts: Optional[torch.Tensor] = None,
+    recovery_splits: Optional[str] = None,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """The ragged form (see flashinfer.dsa_indexer.dsa_indexer_det_topk)."""
     fp4 = q_scale is not None
+    if recovery_splits not in (None, "adaptive", "legacy"):
+        raise ValueError("recovery_splits must be 'adaptive' or 'legacy'")
     if fp4:
         if q.dtype not in (torch.uint8, torch.int8) or k.dtype not in (
             torch.uint8,
@@ -394,6 +397,7 @@ def dsa_indexer_det_topk(
         int(classes),
         bool(scan),
         device_support_pdl(dev) if enable_pdl is None else bool(enable_pdl),
+        recovery_splits != "legacy",
     )
     return indices, scores
 

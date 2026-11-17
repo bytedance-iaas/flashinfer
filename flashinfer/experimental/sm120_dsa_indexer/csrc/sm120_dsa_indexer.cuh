@@ -474,6 +474,7 @@ struct ScoreParams {
   int num_keys;
   int capacity;
   int kv_splits;  // EXACT: units sharing one row's key range
+  int adaptive_recovery;
   int num_units;
   // EXACT: units are (listed row, split); the list length is read on the
   // device.
@@ -560,6 +561,24 @@ struct ScoreSmem {
                 "SM120 shared memory");
 };
 
+// Keep the host policy's 3% improvement threshold without device FP64 work.
+// The flagged list is immutable throughout all phases of this launch.
+__device__ __forceinline__ int recovery_splits(const ScoreParams& p) {
+  if (!p.adaptive_recovery) return p.kv_splits;
+  const int rows = max(1, *p.num_unit_rows);
+  const int sms = static_cast<int>(gridDim.x);
+  const int max_splits = min(p.kv_splits, 4 * sms / rows + 1);
+  int best = 1, best_waves = (rows + sms - 1) / sms;
+  for (int s = 2; s <= max_splits; ++s) {
+    const int waves = (rows * s + sms - 1) / sms;
+    if (100ll * waves * best < 97ll * best_waves * s) {
+      best = s;
+      best_waves = waves;
+    }
+  }
+  return best;
+}
+
 // Sampled tiles of a query block spanning ntiles_total tiles.
 __device__ __forceinline__ int sample_count(const ScoreParams& p, int ntiles_total) {
   // rank at the target = target * sampled / visible >= kSampleRank
@@ -577,12 +596,12 @@ __device__ __forceinline__ int sample_count(const ScoreParams& p, int ntiles_tot
 // A unit's tile range. Tiles are aligned to 128 keys, so every TMA box is;
 // keys outside a row's visible range are masked.
 template <int kBlockQ, Mode kMode>
-__device__ __forceinline__ void unit_tiles(const ScoreParams& p, int phase, int unit, int& row0,
-                                           int& only_qi, int& base, int& ntiles_total,
+__device__ __forceinline__ void unit_tiles(const ScoreParams& p, int phase, int unit, int splits,
+                                           int& row0, int& only_qi, int& base, int& ntiles_total,
                                            int& tile_begin, int& ntiles) {
   const int sample_units = kSampleTiles / p.sample_unit_tiles;
-  int q_block = kMode != Mode::kSample ? unit / p.kv_splits : unit / sample_units;
-  const int split = kMode != Mode::kSample ? unit % p.kv_splits : unit % sample_units;
+  int q_block = kMode != Mode::kSample ? unit / splits : unit / sample_units;
+  const int split = kMode != Mode::kSample ? unit % splits : unit % sample_units;
   only_qi = -1;
   if (p.unit_rows != nullptr) {
     const int row = __ldg(p.unit_rows + q_block);
@@ -618,7 +637,7 @@ __device__ __forceinline__ void unit_tiles(const ScoreParams& p, int phase, int 
     tile_begin = min(split * p.sample_unit_tiles, n);
     ntiles = min(n - tile_begin, p.sample_unit_tiles);
   } else {
-    const int chunk = (ntiles_total + p.kv_splits - 1) / p.kv_splits;
+    const int chunk = (ntiles_total + splits - 1) / splits;
     tile_begin = split * chunk;
     ntiles = max(0, min(chunk, ntiles_total - tile_begin));
     if (kMode == Mode::kExact && phase >= 3 && phase < 6 && !p.xs[row0 + only_qi].need_ids)
@@ -640,8 +659,8 @@ __device__ __forceinline__ int res_unit(int pos, int num_units) {
   return i < num_units ? num_units - 1 - i : -1;
 }
 
-__device__ __forceinline__ int num_units_of(const ScoreParams& p) {
-  return p.num_unit_rows != nullptr ? *p.num_unit_rows * p.kv_splits : p.num_units;
+__device__ __forceinline__ int num_units_of(const ScoreParams& p, int splits) {
+  return p.num_unit_rows != nullptr ? *p.num_unit_rows * splits : p.num_units;
 }
 
 // The sequence of work pieces one CTA processes; the producer and the math
@@ -649,9 +668,11 @@ __device__ __forceinline__ int num_units_of(const ScoreParams& p) {
 template <int kBlockQ, Mode kMode, bool kResLo = false>
 struct WorkIter {
   int unit, num_units;  // unit mode
-  int pos, end, qb;     // stream-K mode: global tile range [pos, end)
+  int splits;
+  int pos, end, qb;  // stream-K mode: global tile range [pos, end)
 
-  __device__ __forceinline__ explicit WorkIter(const ScoreParams& p) {
+  __device__ __forceinline__ explicit WorkIter(const ScoreParams& p, int kv_splits)
+      : splits(kv_splits) {
     if (kMode == Mode::kScan && p.tile_prefix != nullptr) {
       const int total = p.num_qblocks > 0 ? __ldg(p.tile_prefix + p.num_qblocks - 1) : 0;
       const int per = (total + gridDim.x - 1) / gridDim.x;
@@ -669,7 +690,7 @@ struct WorkIter {
       unit = num_units = 0;
     } else {
       unit = blockIdx.x;
-      num_units = num_units_of(p);
+      num_units = num_units_of(p, splits);
       pos = end = qb = 0;
     }
   }
@@ -680,7 +701,7 @@ struct WorkIter {
       if (pos >= end) return false;
       while (__ldg(p.tile_prefix + qb) <= pos) ++qb;
       const int first = qb > 0 ? __ldg(p.tile_prefix + qb - 1) : 0;
-      unit_tiles<kBlockQ, kMode>(p, phase, qb * p.kv_splits, row0, only_qi, base, ntiles_total,
+      unit_tiles<kBlockQ, kMode>(p, phase, qb * splits, splits, row0, only_qi, base, ntiles_total,
                                  tile_begin, ntiles);
       tile_begin = pos - first;
       ntiles = min(end, __ldg(p.tile_prefix + qb)) - pos;
@@ -710,7 +731,7 @@ struct WorkIter {
         if (p.res_cap > 0 && bk > p.res_cap) continue;
         if (kResLo && p.res_lo > 0 && bk <= p.res_lo) continue;
       }
-      unit_tiles<kBlockQ, kMode>(p, phase, u, row0, only_qi, base, ntiles_total, tile_begin,
+      unit_tiles<kBlockQ, kMode>(p, phase, u, splits, row0, only_qi, base, ntiles_total, tile_begin,
                                  ntiles);
       // SAMPLE: a short row samples fewer tiles than its block has units.
       if (kMode != Mode::kSample || ntiles > 0) return true;
@@ -785,7 +806,7 @@ __device__ __forceinline__ int chunk_of(int i, int c, int ntiles_total, int ntil
 // the row's; the CTA finishing the row's last unit of this phase picks the
 // bin holding the wanted rank and advances the row's state.
 __device__ __noinline__ void exact_unit_done(const ScoreParams& p, int phase, int r,
-                                             uint32_t* shist, int tid) {
+                                             uint32_t* shist, int tid, int splits) {
   __shared__ int s_last;
   uint32_t* ghist =
       reinterpret_cast<uint32_t*>(p.cand_score + static_cast<int64_t>(r) * p.capacity);
@@ -800,7 +821,7 @@ __device__ __noinline__ void exact_unit_done(const ScoreParams& p, int phase, in
   }
   __threadfence();
   math_barrier();
-  if (tid == 0) s_last = atomicAdd(&st.done, 1) == p.kv_splits - 1;
+  if (tid == 0) s_last = atomicAdd(&st.done, 1) == splits - 1;
   math_barrier();
   if (!s_last) return;
   __threadfence();
@@ -1958,6 +1979,13 @@ __global__ void __launch_bounds__(kNumWsThreads, 1)
   uint64_t* empty_k = bars + 2 * kNumQStages + L::kKStages;
 
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  int runtime_splits = p.kv_splits;
+  if constexpr (kMode == Mode::kExact) {
+    __shared__ int chosen_splits;
+    if (tid == 0) chosen_splits = recovery_splits(p);
+    __syncthreads();
+    runtime_splits = chosen_splits;
+  }
   // RESIDENT: per slot, scores ready (math -> selectors) and slot free
   // (selectors -> math), and each row's order-key range.
   constexpr int kSlots = kResSlotsT;
@@ -2107,7 +2135,7 @@ __global__ void __launch_bounds__(kNumWsThreads, 1)
         if (*p.num_unit_rows == 0) break;  // no flagged row: every CTA leaves at once
       }
       if (issuer) {
-        WorkIter<kBlockQ, kMode, kResLo> work(p);
+        WorkIter<kBlockQ, kMode, kResLo> work(p, runtime_splits);
         int row0, only_qi, base, ntiles_total, tile_begin, ntiles;
         for (; work.next(p, phase, row0, only_qi, base, ntiles_total, tile_begin, ntiles);
              qr.next()) {
@@ -2176,7 +2204,7 @@ __global__ void __launch_bounds__(kNumWsThreads, 1)
       if constexpr (kMode == Mode::kExact) {
         if (*p.num_unit_rows == 0) break;
       }
-      WorkIter<kBlockQ, kMode, kResLo> work(p);
+      WorkIter<kBlockQ, kMode, kResLo> work(p, runtime_splits);
       int row0, only_qi, base, ntiles_total, tile_begin, ntiles;
       int res_it = 0;  // RESIDENT: the block's scratch slot is res_it % kSlots
       for (; work.next(p, phase, row0, only_qi, base, ntiles_total, tile_begin, ntiles);
@@ -2523,7 +2551,8 @@ __global__ void __launch_bounds__(kNumWsThreads, 1)
             if (ws_n[qi] > 0) flush_row(qi);
         }
         if constexpr (kMode == Mode::kExact) {
-          if (x_active && phase < 6) exact_unit_done(p, phase, row0 + only_qi, shist, tid);
+          if (x_active && phase < 6)
+            exact_unit_done(p, phase, row0 + only_qi, shist, tid, runtime_splits);
         }
         fence_proxy_async();
         mbar_arrive(empty_q + qs);
