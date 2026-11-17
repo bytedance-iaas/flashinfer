@@ -24,6 +24,7 @@ them per call).  The pure-torch oracle follows the kernel's numerical boundary:
 from __future__ import annotations
 
 import os
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -368,6 +369,38 @@ def test_large_rows_use_m128_and_match_oracle(ep_layer, rows) -> None:
     torch.cuda.synchronize()
     assert _launch(layer)["instance"].startswith("m128")
     check_close(out, oracle(tensors))
+    _protocol_clean(layer)
+
+
+@pytest.mark.arch_sm120
+@pytest.mark.gpu_4
+@pytest.mark.parametrize("rows", [0, 1, 512, 4095, 4096])
+def test_rank_uniform_bound_avoids_host_gather_and_preserves_outputs(
+    ep_layer, rows
+) -> None:
+    rank, world_size, layer, oracle, shape = ep_layer
+    tensors = make_inputs(rows, seed=170 + rank, shape=shape)
+    reference = layer(tensors)
+    with patch.object(
+        layer._kernel,
+        "_gather_routing",
+        side_effect=AssertionError("bounded call must not gather routing on the host"),
+    ):
+        out = layer.forward(tensors, compile_tokens_per_rank=rows)
+    torch.cuda.synchronize()
+    assert torch.equal(out, reference)
+    check_close(out, oracle(tensors))
+    if rows:
+        assert _launch(layer)["grid_rule"] == "bound"
+    else:
+        assert _launch(layer)["skipped"]
+    _protocol_clean(layer)
+    # The next ordinary call must restore the dynamic routing path.
+    again = layer(tensors)
+    torch.cuda.synchronize()
+    assert torch.equal(again, reference)
+    if rows:
+        assert _launch(layer)["grid_rule"] == "routing"
     _protocol_clean(layer)
 
 

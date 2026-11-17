@@ -553,6 +553,7 @@ class MoEEpMegaLayer(nn.Module):
         t: "MoEEpTensors",
         *,
         workspace: MoEEpMegaWorkspace | None = None,
+        compile_tokens_per_rank: int | None = None,
         return_workspace_view: bool = False,
     ) -> torch.Tensor:
         """Run MegaMoE and return either an owned tensor or a workspace view.
@@ -562,6 +563,8 @@ class MoEEpMegaLayer(nn.Module):
         ``return_workspace_view=True`` explicitly opts into a borrowed view on
         backends that support one. A view remains valid under stream ordering
         until the next launch reuses the pooled physical workspace.
+        ``compile_tokens_per_rank`` is a rank-uniform row bound for this
+        invocation, as on ``stage``. All EP ranks must use the same bound.
         """
         if return_workspace_view and t.output is not None:
             raise MoEEpConfigError(
@@ -588,7 +591,11 @@ class MoEEpMegaLayer(nn.Module):
             backend_workspace,
             quantize_input,
             transformed_weights,
-        ) = self._prepare_inputs(t, workspace=workspace)
+        ) = self._prepare_inputs(
+            t,
+            workspace=workspace,
+            compile_tokens_per_rank=compile_tokens_per_rank,
+        )
         output = t.output
         if output is None and not return_workspace_view:
             # Owned-output allocation must stay ahead of the staging round
