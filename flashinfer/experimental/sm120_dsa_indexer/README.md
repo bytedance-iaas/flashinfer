@@ -60,6 +60,14 @@ and does not change scores, causal visibility or deterministic TopK. Set
 `recovery_splits="legacy"` to retain the one-row-per-256 host estimate. The
 candidate capacity and scratch buffers remain unchanged.
 
+The ragged entry point also accepts `sample_target`, an optional integer in
+`[top_k, 6144]`. Omitting it retains the existing threshold target. The scan
+still scores every visible key and candidate deficits or overflows still take
+full exact recovery. A higher target can trade fewer deficits for more
+overflows and candidate-finalization work; measure the complete call for the
+intended full/tail shapes before selecting it. It does not change scratch
+capacity or score arithmetic.
+
 ### Optional ragged diagnostics
 
 The caller may supply `diagnostic_counts`, a contiguous int32 CUDA tensor of

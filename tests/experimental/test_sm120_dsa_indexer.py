@@ -399,7 +399,8 @@ def _ragged_call(fp4, heads, top_k, seg_q, seg_k, seed, **kw):
 
 @pytest.mark.parametrize("heads", [32, 64])
 @pytest.mark.parametrize("route", ["insufficient", "overflow", "empty_recovery"])
-def test_ragged_diagnostics_preserve_exact_outputs(heads, route):
+@pytest.mark.parametrize("sample_target", [None, 4096, 5120])
+def test_ragged_diagnostics_preserve_exact_outputs(heads, route, sample_target):
     """Recovery counters distinguish failure reasons without changing TopK."""
     rows, keys, top_k = 8, 65536, 2048
     dev = torch.device("cuda")
@@ -423,7 +424,14 @@ def test_ragged_diagnostics_preserve_exact_outputs(heads, route):
     )
     counts = torch.full((1, 8), -1, dtype=torch.int32, device=dev)
     actual_i, actual_s = dsa_indexer_det_topk(
-        q, k, w, cu_q, cu_k, diagnostic_counts=counts, **kwargs
+        q,
+        k,
+        w,
+        cu_q,
+        cu_k,
+        diagnostic_counts=counts,
+        sample_target=sample_target,
+        **kwargs,
     )
     torch.testing.assert_close(actual_i, expected_i, atol=0, rtol=0)
     torch.testing.assert_close(actual_s, expected_s, atol=0, rtol=0)
@@ -439,6 +447,27 @@ def test_ragged_diagnostics_preserve_exact_outputs(heads, route):
         assert recorded[5] == rows
         assert recorded[6] == 0
         assert recorded[7] > rows
+
+
+@pytest.mark.parametrize("target", [True, 0, 2047, 6145, "5120"])
+def test_ragged_rejects_invalid_sampling_target(target):
+    """Targets must preserve both the exact TopK floor and buffer headroom."""
+    device = torch.device("cuda")
+    q = torch.ones((1, 32, 128), device=device).to(torch.float8_e4m3fn)
+    k = torch.ones((4, 128), device=device).to(torch.float8_e4m3fn)
+    cu_q = torch.tensor([0, 1], device=device, dtype=torch.int32)
+    cu_k = torch.tensor([0, 4], device=device, dtype=torch.int32)
+    with pytest.raises(ValueError, match="sample_target"):
+        dsa_indexer_det_topk(
+            q,
+            k,
+            torch.ones((1, 32), device=device),
+            cu_q,
+            cu_k,
+            backend="sm120",
+            k_scale=torch.ones(4, device=device),
+            sample_target=target,
+        )
 
 
 @pytest.mark.parametrize("fp4", [False, True])
