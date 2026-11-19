@@ -17,3 +17,9 @@ The TIRx KDA kernels are adapted from NVlabs/kda (260927-kda-for-kda),
 Copyright (c) 2026 KDA Team, under the MIT License (licenses/LICENSE.kda-for-kda).
 The split kernel also retains its original Apache-2.0 TIRx-author attribution.
 Source: https://github.com/NVlabs/kda/tree/260927-kda-for-kda
+
+The SM120 DSA indexer's single-CTA decode selection
+(flashinfer/experimental/sm120_dsa_indexer/csrc/decode_select_row.cuh) is
+adapted from SGLang's DeepSeek-V4 top-k (TopKRegister and
+coarse_bin_lower_bound), Copyright 2023-2024 SGLang Team, under Apache-2.0.
+Source: https://github.com/sgl-project/sglang (python/sglang/kernels/jit/include/sgl_kernel/deepseek_v4/topk_impl.cuh)
